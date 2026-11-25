@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kana-consultant/kantor/backend/internal/filestore"
 	"github.com/kana-consultant/kantor/backend/internal/model"
 	hrisrepo "github.com/kana-consultant/kantor/backend/internal/repository/hris"
 	marketingrepo "github.com/kana-consultant/kantor/backend/internal/repository/marketing"
@@ -18,8 +19,10 @@ var (
 	ErrFileNotFound    = errors.New("file not found")
 )
 
+// ResolvedFile names either a local Path or a Key in the file store.
 type ResolvedFile struct {
 	Path        string
+	Key         string
 	Permission  string
 	OwnerUserID *string
 }
@@ -39,6 +42,7 @@ type filesEmployeesRepository interface {
 
 type Service struct {
 	uploadsDir         string
+	store              *filestore.Tenant
 	reimbursementsRepo filesReimbursementsRepository
 	campaignsRepo      filesCampaignsRepository
 	employeesRepo      filesEmployeesRepository
@@ -46,12 +50,14 @@ type Service struct {
 
 func New(
 	uploadsDir string,
+	store *filestore.Tenant,
 	reimbursementsRepo filesReimbursementsRepository,
 	campaignsRepo filesCampaignsRepository,
 	employeesRepo filesEmployeesRepository,
 ) *Service {
 	return &Service{
 		uploadsDir:         uploadsDir,
+		store:              store,
 		reimbursementsRepo: reimbursementsRepo,
 		campaignsRepo:      campaignsRepo,
 		employeesRepo:      employeesRepo,
@@ -103,12 +109,15 @@ func (s *Service) Resolve(ctx context.Context, fileType string, resourceID strin
 		}
 		ownerUserID = employee.UserID
 	case "profiles":
-		permission = ""
-		relativePath = filepath.Join("profiles", resourceID, filename)
 		trimmedResourceID := strings.TrimSpace(resourceID)
-		if trimmedResourceID != "" {
-			ownerUserID = &trimmedResourceID
+		key := "profiles/" + trimmedResourceID + "/" + filename
+		if _, err := s.store.Size(ctx, key); err != nil {
+			if errors.Is(err, filestore.ErrNotFound) || errors.Is(err, filestore.ErrInvalidKey) {
+				return ResolvedFile{}, ErrFileNotFound
+			}
+			return ResolvedFile{}, err
 		}
+		return ResolvedFile{Key: key, OwnerUserID: &trimmedResourceID}, nil
 	default:
 		return ResolvedFile{}, ErrUnsupportedType
 	}
@@ -144,4 +153,12 @@ func (s *Service) safeJoin(relativePath string) (string, error) {
 	}
 
 	return candidatePath, nil
+}
+
+func (s *Service) Read(ctx context.Context, key string) ([]byte, error) {
+	data, err := s.store.Get(ctx, key)
+	if errors.Is(err, filestore.ErrNotFound) {
+		return nil, ErrFileNotFound
+	}
+	return data, err
 }

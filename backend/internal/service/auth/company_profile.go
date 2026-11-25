@@ -5,8 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -15,9 +14,9 @@ import (
 
 	"github.com/kana-consultant/kantor/backend/internal/docgen"
 	"github.com/kana-consultant/kantor/backend/internal/dto"
+	"github.com/kana-consultant/kantor/backend/internal/filestore"
 	authrepo "github.com/kana-consultant/kantor/backend/internal/repository/auth"
 	"github.com/kana-consultant/kantor/backend/internal/tenant"
-	"github.com/kana-consultant/kantor/backend/internal/uploads"
 )
 
 // MaxCompanyLogoBytes is the upload limit for the tenant logo.
@@ -26,8 +25,6 @@ const MaxCompanyLogoBytes = 2 << 20
 const (
 	companyLogoDir      = "branding"
 	companyLogoFilename = "logo.png"
-	companyLogoFileMode = 0o640
-	companyLogoDirMode  = 0o750
 )
 
 var (
@@ -49,15 +46,20 @@ type companyProfileRepository interface {
 // CompanyProfileService owns the tenant's 'company_profile' setting and the
 // tenant logo used on generated documents. The logo is processed once on
 // upload (docgen.ProcessLogo: trimmed, downscaled, re-encoded as PNG) and
-// stored as UPLOADS_DIR/branding/<tenant_id>/logo.png with mode 0640.
+// stored in the file store as branding/<tenant_id>/logo.png.
 type CompanyProfileService struct {
-	repo       companyProfileRepository
-	uploadsDir string
-	now        func() time.Time
+	repo  companyProfileRepository
+	store *filestore.Tenant
+	now   func() time.Time
 }
 
 func NewCompanyProfileService(repo companyProfileRepository, uploadsDir string) *CompanyProfileService {
-	return &CompanyProfileService{repo: repo, uploadsDir: uploadsDir, now: time.Now}
+	return &CompanyProfileService{repo: repo, store: filestore.NewTenant(filestore.NewLocal(uploadsDir), false), now: time.Now}
+}
+
+// SetFileStore replaces the default local store under the uploads directory.
+func (s *CompanyProfileService) SetFileStore(store *filestore.Tenant) {
+	s.store = store
 }
 
 // CompanyProfileChange lists the fields a profile update changed, with their
@@ -152,11 +154,11 @@ func (s *CompanyProfileService) UploadLogo(ctx context.Context, actorID string, 
 		return dto.CompanyProfileResponse{}, err
 	}
 
-	path, err := s.logoPath(ctx)
+	key, err := s.logoKey(ctx)
 	if err != nil {
 		return dto.CompanyProfileResponse{}, err
 	}
-	if err := uploads.WriteFileAtomic(path, processed, companyLogoFileMode, companyLogoDirMode); err != nil {
+	if err := s.store.Put(ctx, key, processed, "image/png"); err != nil {
 		return dto.CompanyProfileResponse{}, fmt.Errorf("store company logo: %w", err)
 	}
 
@@ -169,13 +171,13 @@ func (s *CompanyProfileService) UploadLogo(ctx context.Context, actorID string, 
 
 // DeleteLogo removes the tenant logo. removed is false when there was none.
 func (s *CompanyProfileService) DeleteLogo(ctx context.Context, actorID string) (dto.CompanyProfileResponse, bool, error) {
-	path, err := s.logoPath(ctx)
+	key, err := s.logoKey(ctx)
 	if err != nil {
 		return dto.CompanyProfileResponse{}, false, err
 	}
 	removed := true
-	if err := os.Remove(path); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
+	if err := s.store.Delete(ctx, key); err != nil {
+		if !errors.Is(err, filestore.ErrNotFound) {
 			return dto.CompanyProfileResponse{}, false, fmt.Errorf("remove company logo: %w", err)
 		}
 		removed = false
@@ -190,13 +192,13 @@ func (s *CompanyProfileService) DeleteLogo(ctx context.Context, actorID string) 
 // LogoPNG returns the processed tenant logo, or ErrCompanyLogoNotFound.
 // Document rendering passes it to docgen.WithLogo.
 func (s *CompanyProfileService) LogoPNG(ctx context.Context) ([]byte, error) {
-	path, err := s.logoPath(ctx)
+	key, err := s.logoKey(ctx)
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := s.store.Get(ctx, key)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, filestore.ErrNotFound) {
 			return nil, ErrCompanyLogoNotFound
 		}
 		return nil, fmt.Errorf("read company logo: %w", err)
@@ -229,21 +231,21 @@ func (s *CompanyProfileService) toResponse(ctx context.Context, record authrepo.
 }
 
 func (s *CompanyProfileService) hasLogo(ctx context.Context) (bool, error) {
-	path, err := s.logoPath(ctx)
+	key, err := s.logoKey(ctx)
 	if err != nil {
 		return false, err
 	}
-	info, err := os.Stat(path)
+	size, err := s.store.Size(ctx, key)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, filestore.ErrNotFound) {
 			return false, nil
 		}
 		return false, fmt.Errorf("stat company logo: %w", err)
 	}
-	return info.Mode().IsRegular() && info.Size() > 0, nil
+	return size > 0, nil
 }
 
-func (s *CompanyProfileService) logoPath(ctx context.Context) (string, error) {
+func (s *CompanyProfileService) logoKey(ctx context.Context) (string, error) {
 	info, ok := tenant.FromContext(ctx)
 	if !ok {
 		return "", ErrCompanyTenantMissing
@@ -254,7 +256,7 @@ func (s *CompanyProfileService) logoPath(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", ErrCompanyTenantMissing
 	}
-	return filepath.Join(s.uploadsDir, companyLogoDir, parsed.String(), companyLogoFilename), nil
+	return path.Join(companyLogoDir, parsed.String(), companyLogoFilename), nil
 }
 
 func diffCompanyProfile(old, updated authrepo.CompanyProfileRecord) CompanyProfileChange {
