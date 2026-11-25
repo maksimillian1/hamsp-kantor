@@ -73,6 +73,7 @@ type App struct {
 	permissionCache      *rbac.PermissionCache
 	tenantResolver       *tenant.Resolver
 	externalResolver     *tenant.ExternalResolver
+	ensurePlatformUser   func(context.Context, string) (string, error)
 	metrics              *metrics.Registry
 	accessTokenBlacklist *backendauth.AccessTokenBlacklist
 	// auditRepository backs the opt-in audit_logs redaction scrub of
@@ -307,6 +308,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		permissionCache:      permissionCache,
 		tenantResolver:       tenantResolver,
 		externalResolver:     externalResolver,
+		ensurePlatformUser:   authRepository.EnsurePlatformUser,
 		metrics:              metrics.NewRegistry(),
 		accessTokenBlacklist: accessTokenBlacklist,
 		auditRepository:      auditRepository,
@@ -505,7 +507,11 @@ func (a *App) buildRouter(
 			})
 
 			r.Group(func(protected chi.Router) {
-				protected.Use(platformmiddleware.AuthMiddleware(authService.ParseAccessToken, a.permissionCache.Load, a.accessTokenBlacklist, patService.Authenticate))
+				if a.cfg.PlatformMode {
+					protected.Use(platformmiddleware.PlatformAuthMiddleware(a.ensurePlatformUser, a.permissionCache.Load))
+				} else {
+					protected.Use(platformmiddleware.AuthMiddleware(authService.ParseAccessToken, a.permissionCache.Load, a.accessTokenBlacklist, patService.Authenticate))
+				}
 				// Per-user throttle so a single compromised token cannot hammer
 				// expensive endpoints (e.g. HRIS overview, exports). 240 req/min
 				// is high enough to leave normal UI navigation untouched.

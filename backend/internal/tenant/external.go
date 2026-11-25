@@ -16,7 +16,8 @@ import (
 // of the allowed form.
 var ErrInvalidExternalID = errors.New("tenant: invalid external id")
 
-var externalIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+// ExternalIDPattern is the form of the platform's tenant and user IDs.
+var ExternalIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // ExternalResolver maps the platform's tenant ID (tenants.external_id) to a
 // KANTOR tenant, creating the tenant on its first request. A tenant is served
@@ -41,7 +42,7 @@ func NewExternalResolver(pool *pgxpool.Pool, onCreate func(ctx context.Context, 
 }
 
 func (r *ExternalResolver) Resolve(ctx context.Context, externalID string) (Info, error) {
-	if !externalIDPattern.MatchString(externalID) {
+	if !ExternalIDPattern.MatchString(externalID) {
 		return Info{}, ErrInvalidExternalID
 	}
 
