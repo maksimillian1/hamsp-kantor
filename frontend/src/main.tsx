@@ -7,6 +7,7 @@ import { RouterProvider } from "@tanstack/react-router";
 import "@/index.css";
 import { ThemeProvider } from "@/components/providers/theme-provider";
 import { ToastProvider } from "@/components/providers/toast-provider";
+import { loadPlatformConfig } from "@/lib/platform";
 import { createAppRouter } from "@/router";
 
 const queryClient = new QueryClient({
@@ -28,7 +29,7 @@ if (!rootElement) {
   throw new Error("Root element not found");
 }
 
-ReactDOM.createRoot(rootElement).render(
+void loadPlatformConfig().then(() => ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     <ThemeProvider>
       <QueryClientProvider client={queryClient}>
@@ -38,4 +39,4 @@ ReactDOM.createRoot(rootElement).render(
       </QueryClientProvider>
     </ThemeProvider>
   </React.StrictMode>,
-);
+));

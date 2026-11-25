@@ -11,6 +11,7 @@ import { ApiError } from "@/lib/api-client";
 import { getDefaultAuthorizedPath } from "@/lib/rbac";
 import { getAuthPublicOptions, getValidStoredSession, login } from "@/services/auth";
 import { useAuthStore } from "@/stores/auth-store";
+import { isPlatformMode, startPlatformLogin } from "@/lib/platform";
 
 const loginSchema = z.object({
   email: z.email("Email wajib valid"),
@@ -26,12 +27,15 @@ export const Route = createFileRoute("/login")({
         ? search.redirect
         : undefined,
   }),
-  beforeLoad: async () => {
+  beforeLoad: async ({ search }) => {
     const session = getValidStoredSession();
     if (session?.tokens.access_token) {
       throw redirect({
         to: getDefaultAuthorizedPath(session),
       });
+    }
+    if (isPlatformMode()) {
+      await startPlatformLogin(search.redirect);
     }
   },
   component: LoginPage,

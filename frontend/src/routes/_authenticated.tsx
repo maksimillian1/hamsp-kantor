@@ -9,19 +9,23 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { PageShell } from "@/components/layout/page-shell";
+import { isPathAvailable } from "@/lib/platform";
 import { ensureAuthenticated } from "@/services/auth";
 import { fetchSessionProfile, syncClientContext } from "@/services/foundation";
 import { useAuthStore } from "@/stores/auth-store";
 import type { AuthUser } from "@/types/auth";
 
 export const Route = createFileRoute("/_authenticated")({
-  beforeLoad: async () => {
+  beforeLoad: async ({ location }) => {
     const session = await ensureAuthenticated();
 
     if (!session) {
       throw redirect({
         to: "/login",
       });
+    }
+    if (!isPathAvailable(location.pathname)) {
+      throw redirect({ to: "/operational/overview" });
     }
   },
   component: AuthenticatedLayout,

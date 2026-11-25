@@ -5,6 +5,8 @@ import { Link, createFileRoute, redirect, useNavigate } from "@tanstack/react-ro
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 
+import { isPlatformMode } from "@/lib/platform";
+
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -30,6 +32,9 @@ type RegisterFormValues = z.infer<typeof registerSchema>;
 
 export const Route = createFileRoute("/register")({
   beforeLoad: async () => {
+    if (isPlatformMode()) {
+      throw redirect({ to: "/login", search: { redirect: undefined } });
+    }
     const session = getValidStoredSession();
     if (session?.tokens.access_token) {
       throw redirect({

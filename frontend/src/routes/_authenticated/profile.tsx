@@ -32,6 +32,7 @@ import { ApiError } from "@/lib/api-client";
 import { formatCalendarDate } from "@/lib/date";
 import { cn } from "@/lib/utils";
 import { changePassword, ensureAuthenticated, logout } from "@/services/auth";
+import { isPlatformMode } from "@/lib/platform";
 import { changeEmail, getProfile, profileKeys, updateProfile, uploadProfileAvatar } from "@/services/profile";
 import { toast } from "@/stores/toast-store";
 
@@ -323,9 +324,13 @@ function ProfilePage() {
 
       {/* Info grid */}
       <div className="grid gap-4 md:grid-cols-2">
-        <div className="cursor-pointer" onClick={() => setIsEmailModalOpen(true)} title="Klik untuk ganti email">
+        {isPlatformMode() ? (
           <InfoCard icon={Mail} label="Email" value={user?.email ?? "-"} />
-        </div>
+        ) : (
+          <div className="cursor-pointer" onClick={() => setIsEmailModalOpen(true)} title="Klik untuk ganti email">
+            <InfoCard icon={Mail} label="Email" value={user?.email ?? "-"} />
+          </div>
+        )}
         <InfoCard icon={Shield} label="Role" value={roleLabels.join(", ") || roleSummary || "-"} />
         <InfoCard
           icon={Phone}
@@ -419,25 +424,29 @@ function ProfilePage() {
         )}
       </div>
 
-      <div className="rounded-xl border bg-card p-5">
-        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <div className="flex items-center gap-2 text-text-secondary">
-              <Shield className="h-4 w-4" />
-              <span className="text-sm font-medium">Keamanan Akun</span>
+      {!isPlatformMode() && (
+        <>
+          <div className="rounded-xl border bg-card p-5">
+            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <div className="flex items-center gap-2 text-text-secondary">
+                  <Shield className="h-4 w-4" />
+                  <span className="text-sm font-medium">Keamanan Akun</span>
+                </div>
+                <p className="mt-1 text-sm text-text-primary">
+                  Ganti password akun Anda. Setelah berhasil, Anda akan diminta login ulang.
+                </p>
+              </div>
+              <Button className="w-full md:w-auto" onClick={() => setIsPasswordModalOpen(true)} type="button">
+                <KeyRound className="mr-2 h-4 w-4" />
+                Ganti Password
+              </Button>
             </div>
-            <p className="mt-1 text-sm text-text-primary">
-              Ganti password akun Anda. Setelah berhasil, Anda akan diminta login ulang.
-            </p>
           </div>
-          <Button className="w-full md:w-auto" onClick={() => setIsPasswordModalOpen(true)} type="button">
-            <KeyRound className="mr-2 h-4 w-4" />
-            Ganti Password
-          </Button>
-        </div>
-      </div>
 
-      <TokenManagerCard />
+          <TokenManagerCard />
+        </>
+      )}
 
       <FormModal
         error={changePasswordMutation.error instanceof ApiError ? changePasswordMutation.error.message : null}

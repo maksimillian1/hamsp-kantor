@@ -1,6 +1,7 @@
 import { env } from "@/lib/env";
+import { isPlatformMode, refreshPlatformTokens, type PlatformTokens } from "@/lib/platform";
 import { getStoredSession, useAuthStore } from "@/stores/auth-store";
-import type { AuthPayload } from "@/types/auth";
+import type { AuthModuleRole, AuthPayload, AuthSession, AuthUser } from "@/types/auth";
 
 export interface ApiSuccess<TData> {
   success: true;
@@ -134,9 +135,36 @@ function getAccessToken(): string | undefined {
   return getStoredSession()?.tokens.access_token;
 }
 
+interface SessionProfile {
+  user: AuthUser;
+  module_roles: Record<string, AuthModuleRole>;
+  permissions: string[];
+  is_super_admin: boolean;
+}
+
+/** Builds the KANTOR session for platform tokens from /auth/me. */
+export async function buildPlatformSession(tokens: PlatformTokens): Promise<AuthSession> {
+  const profile = await getJSON<SessionProfile>("/auth/me", tokens.access_token);
+  return {
+    ...profile,
+    tokens: { access_token: tokens.access_token, token_type: "Bearer", expires_in: tokens.expires_in },
+  };
+}
+
+export async function refreshPlatformSession(): Promise<AuthSession> {
+  const session = await buildPlatformSession(await refreshPlatformTokens());
+  useAuthStore.getState().setSession(session);
+  return session;
+}
+
 let refreshSessionPromise: Promise<AuthPayload> | null = null;
 
 async function refreshAuthenticatedSession() {
+  if (!refreshSessionPromise && isPlatformMode()) {
+    refreshSessionPromise = refreshPlatformSession().finally(() => {
+      refreshSessionPromise = null;
+    });
+  }
   if (!refreshSessionPromise) {
     refreshSessionPromise = (async () => {
       const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
