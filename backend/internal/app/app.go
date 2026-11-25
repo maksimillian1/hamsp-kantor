@@ -42,6 +42,7 @@ import (
 	"github.com/kana-consultant/kantor/backend/internal/metrics"
 	platformmiddleware "github.com/kana-consultant/kantor/backend/internal/middleware"
 	"github.com/kana-consultant/kantor/backend/internal/rbac"
+	"github.com/kana-consultant/kantor/backend/internal/repository"
 	auditrepo "github.com/kana-consultant/kantor/backend/internal/repository/audit"
 	authrepo "github.com/kana-consultant/kantor/backend/internal/repository/auth"
 	hrisrepo "github.com/kana-consultant/kantor/backend/internal/repository/hris"
@@ -1062,18 +1063,16 @@ func seedTenants(ctx context.Context, pool *pgxpool.Pool, tenants []config.Tenan
 			}
 		}
 
+		seedTenantRow := func(sql string, args ...any) error {
+			info := tenant.Info{ID: tenantID, Slug: tc.Slug, Name: tc.Name}
+			return platformmiddleware.RunForTenant(ctx, pool, info, func(tCtx context.Context, _ tenant.Info) error {
+				_, err := repository.DB(tCtx, nil).Exec(tCtx, sql, args...)
+				return err
+			})
+		}
+
 		// Ensure WA config row exists (disabled by default, admin enables via UI).
-		// tenant_wa_configs has RLS, so we must SET the GUC on a dedicated connection.
-		waConn, err := pool.Acquire(ctx)
-		if err != nil {
-			return fmt.Errorf("acquire conn for wa config seed: %w", err)
-		}
-		_, err = waConn.Exec(ctx, fmt.Sprintf("SET app.current_tenant = '%s'", tenantID))
-		if err != nil {
-			waConn.Release()
-			return fmt.Errorf("set tenant guc for wa config seed: %w", err)
-		}
-		_, err = waConn.Exec(ctx,
+		err := seedTenantRow(
 			`INSERT INTO tenant_wa_configs (
 				tenant_id, api_url, api_key, session_name, enabled,
 				max_daily_messages, min_delay_ms, max_delay_ms,
@@ -1086,72 +1085,37 @@ func seedTenants(ctx context.Context, pool *pgxpool.Pool, tenants []config.Tenan
 			waDefaults.MaxDailyMessages, waDefaults.MinDelayMS, waDefaults.MaxDelayMS,
 			waDefaults.ReminderCron, waDefaults.WeeklyDigestCron,
 		)
-		_, _ = waConn.Exec(ctx, "RESET ALL")
-		waConn.Release()
 		if err != nil {
 			return fmt.Errorf("seed wa config for tenant %q: %w", tc.Slug, err)
 		}
 
 		// Ensure tracker_reminder_configs row exists (enabled by default, admin tunes via UI).
-		trConn, err := pool.Acquire(ctx)
-		if err != nil {
-			return fmt.Errorf("acquire conn for tracker reminder config seed: %w", err)
-		}
-		_, err = trConn.Exec(ctx, fmt.Sprintf("SET app.current_tenant = '%s'", tenantID))
-		if err != nil {
-			trConn.Release()
-			return fmt.Errorf("set tenant guc for tracker reminder config seed: %w", err)
-		}
-		_, err = trConn.Exec(ctx,
+		err = seedTenantRow(
 			`INSERT INTO tracker_reminder_configs (tenant_id)
 			 VALUES ($1::uuid)
 			 ON CONFLICT (tenant_id) DO NOTHING`,
 			tenantID)
-		_, _ = trConn.Exec(ctx, "RESET ALL")
-		trConn.Release()
 		if err != nil {
 			return fmt.Errorf("seed tracker reminder config for tenant %q: %w", tc.Slug, err)
 		}
 
 		// Ensure discord_reminder_configs row exists (disabled by default;
 		// webhook URL + shared secret set via super-admin API, not env).
-		drConn, err := pool.Acquire(ctx)
-		if err != nil {
-			return fmt.Errorf("acquire conn for discord reminder config seed: %w", err)
-		}
-		_, err = drConn.Exec(ctx, fmt.Sprintf("SET app.current_tenant = '%s'", tenantID))
-		if err != nil {
-			drConn.Release()
-			return fmt.Errorf("set tenant guc for discord reminder config seed: %w", err)
-		}
-		_, err = drConn.Exec(ctx,
+		err = seedTenantRow(
 			`INSERT INTO discord_reminder_configs (tenant_id)
 			 VALUES ($1::uuid)
 			 ON CONFLICT (tenant_id) DO NOTHING`,
 			tenantID)
-		_, _ = drConn.Exec(ctx, "RESET ALL")
-		drConn.Release()
 		if err != nil {
 			return fmt.Errorf("seed discord reminder config for tenant %q: %w", tc.Slug, err)
 		}
 
 		// Ensure compensation_policies row exists (defaults seeded, admin tunes via UI).
-		cpConn, err := pool.Acquire(ctx)
-		if err != nil {
-			return fmt.Errorf("acquire conn for compensation policy seed: %w", err)
-		}
-		_, err = cpConn.Exec(ctx, fmt.Sprintf("SET app.current_tenant = '%s'", tenantID))
-		if err != nil {
-			cpConn.Release()
-			return fmt.Errorf("set tenant guc for compensation policy seed: %w", err)
-		}
-		_, err = cpConn.Exec(ctx,
+		err = seedTenantRow(
 			`INSERT INTO compensation_policies (tenant_id)
 			 VALUES ($1::uuid)
 			 ON CONFLICT (tenant_id) DO NOTHING`,
 			tenantID)
-		_, _ = cpConn.Exec(ctx, "RESET ALL")
-		cpConn.Release()
 		if err != nil {
 			return fmt.Errorf("seed compensation policy for tenant %q: %w", tc.Slug, err)
 		}
