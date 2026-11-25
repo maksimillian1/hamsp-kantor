@@ -14,6 +14,7 @@ import (
 
 	"github.com/kana-consultant/kantor/backend/internal/config"
 	"github.com/kana-consultant/kantor/backend/internal/dto"
+	"github.com/kana-consultant/kantor/backend/internal/filestore"
 	"github.com/kana-consultant/kantor/backend/internal/httputil"
 	platformmiddleware "github.com/kana-consultant/kantor/backend/internal/middleware"
 	"github.com/kana-consultant/kantor/backend/internal/response"
@@ -32,6 +33,7 @@ type Handler struct {
 	cookiePath     string
 	refreshExpiry  time.Duration
 	uploadsDir     string
+	files          *filestore.Tenant
 }
 
 func New(service *authservice.Service, cfg config.Config) *Handler {
@@ -42,7 +44,13 @@ func New(service *authservice.Service, cfg config.Config) *Handler {
 		cookiePath:    "/api/v1/auth",
 		refreshExpiry: cfg.JWTRefreshExpiry,
 		uploadsDir:    cfg.UploadsDir,
+		files:         filestore.NewTenant(filestore.NewLocal(cfg.UploadsDir), false),
 	}
+}
+
+// SetFileStore replaces the default local store under the uploads directory.
+func (h *Handler) SetFileStore(store *filestore.Tenant) {
+	h.files = store
 }
 
 // SetDocumentMailService wires the documents-only Gmail settings and test

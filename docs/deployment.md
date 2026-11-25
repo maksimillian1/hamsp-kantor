@@ -42,6 +42,10 @@ cp .env.example .env
 | `DATA_ENCRYPTION_KEY` | Yes | — | Encryption key for sensitive data at rest |
 | `DATA_ENCRYPTION_KEY_PREVIOUS` | No | — | Previous encryption key for key rotation (see below) |
 | `UPLOADS_DIR` | No | `uploads` | File upload directory (overridden by Docker Compose) |
+| `FILE_STORAGE` | No | `local` | `local` (under `UPLOADS_DIR`) or `s3`; with `s3`, profile avatars and the company logo go to the bucket under `<tenant_id>/` |
+| `S3_ENDPOINT`, `S3_BUCKET` | With `s3` | — | S3-compatible endpoint (`host:port`) and an existing bucket; checked at startup |
+| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | With `s3` | — | Bucket credentials |
+| `S3_USE_SSL`, `S3_REGION` | No | `true`, empty | TLS to the endpoint; bucket region |
 | `JWT_ACCESS_EXPIRY` | No | `15m` | Access token TTL |
 | `JWT_REFRESH_EXPIRY` | No | `168h` | Refresh token TTL |
 | `CORS_ORIGINS` | No | `http://localhost:3000` | Comma-separated allowed origins |

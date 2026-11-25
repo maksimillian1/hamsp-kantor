@@ -20,6 +20,7 @@ type Config struct {
 	DataEncryptionKey         string
 	DataEncryptionKeyPrevious string
 	UploadsDir                string
+	FileStorage               FileStorageConfig
 	JWTAccessExpiry           time.Duration
 	JWTRefreshExpiry          time.Duration
 	CORSOrigins               []string
@@ -154,6 +155,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	fileStorage, err := loadFileStorageConfig()
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		AppEnv:                    appEnv,
@@ -163,6 +168,7 @@ func Load() (Config, error) {
 		DataEncryptionKey:         dataEncryptionKey,
 		DataEncryptionKeyPrevious: dataEncryptionKeyPrevious,
 		UploadsDir:                getEnv("UPLOADS_DIR", "uploads"),
+		FileStorage:               fileStorage,
 		JWTAccessExpiry:           accessExpiry,
 		JWTRefreshExpiry:          refreshExpiry,
 		CORSOrigins:               splitCSV(getEnv("CORS_ORIGINS", "http://localhost:3000")),
@@ -414,4 +420,42 @@ func parseTenants(raw string) []TenantConfig {
 		})
 	}
 	return tenants
+}
+
+// FileStorageConfig selects where uploaded files are kept: "local" (under
+// UPLOADS_DIR) or "s3" (an S3-compatible bucket).
+type FileStorageConfig struct {
+	Backend       string
+	S3Endpoint    string
+	S3Bucket      string
+	S3AccessKeyID string
+	S3SecretKey   string
+	S3UseSSL      bool
+	S3Region      string
+}
+
+func loadFileStorageConfig() (FileStorageConfig, error) {
+	cfg := FileStorageConfig{
+		Backend:       strings.ToLower(strings.TrimSpace(getEnv("FILE_STORAGE", "local"))),
+		S3Endpoint:    strings.TrimSpace(os.Getenv("S3_ENDPOINT")),
+		S3Bucket:      strings.TrimSpace(os.Getenv("S3_BUCKET")),
+		S3AccessKeyID: os.Getenv("S3_ACCESS_KEY_ID"),
+		S3SecretKey:   os.Getenv("S3_SECRET_ACCESS_KEY"),
+		S3Region:      strings.TrimSpace(os.Getenv("S3_REGION")),
+	}
+	useSSL, err := parseBool("S3_USE_SSL", true)
+	if err != nil {
+		return FileStorageConfig{}, err
+	}
+	cfg.S3UseSSL = useSSL
+	switch cfg.Backend {
+	case "local":
+	case "s3":
+		if cfg.S3Endpoint == "" || cfg.S3Bucket == "" || cfg.S3AccessKeyID == "" || cfg.S3SecretKey == "" {
+			return FileStorageConfig{}, errors.New("FILE_STORAGE=s3 needs S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY")
+		}
+	default:
+		return FileStorageConfig{}, fmt.Errorf("FILE_STORAGE must be local or s3, got %q", cfg.Backend)
+	}
+	return cfg, nil
 }

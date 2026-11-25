@@ -1,12 +1,13 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kana-consultant/kantor/backend/internal/dto"
+	"github.com/kana-consultant/kantor/backend/internal/filestore"
 	platformmiddleware "github.com/kana-consultant/kantor/backend/internal/middleware"
 	"github.com/kana-consultant/kantor/backend/internal/model"
 	"github.com/kana-consultant/kantor/backend/internal/response"
@@ -155,14 +157,14 @@ func (h *Handler) UploadProfileAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	avatarPath, err := saveProfileAvatar(h.uploadsDir, principal.UserID, fileHeader)
+	avatarPath, err := saveProfileAvatar(r.Context(), h.files, principal.UserID, fileHeader)
 	if err != nil {
 		response.WriteError(w, http.StatusBadRequest, "AVATAR_UPLOAD_FAILED", err.Error(), nil)
 		return
 	}
 
 	if err := h.service.UpdateProfileAvatar(r.Context(), principal.UserID, avatarPath); err != nil {
-		_ = os.Remove(filepath.Join(h.uploadsDir, filepath.FromSlash(avatarPath)))
+		_ = h.files.Delete(r.Context(), avatarPath)
 		response.WriteInternalError(r.Context(), w, err, "Gagal menyimpan avatar")
 		return
 	}
@@ -172,7 +174,7 @@ func (h *Handler) UploadProfileAvatar(w http.ResponseWriter, r *http.Request) {
 
 var unsafeCharsRe = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
 
-func saveProfileAvatar(baseDir string, userID string, file *multipart.FileHeader) (string, error) {
+func saveProfileAvatar(ctx context.Context, store *filestore.Tenant, userID string, file *multipart.FileHeader) (string, error) {
 	if _, err := uploads.ValidateMultipartFile(uploads.KindAvatar, file); err != nil {
 		return "", fmt.Errorf("avatar tidak valid: %w", err)
 	}
@@ -183,26 +185,15 @@ func saveProfileAvatar(baseDir string, userID string, file *multipart.FileHeader
 	}
 	defer src.Close()
 
-	dir := filepath.Join(baseDir, "profiles", userID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("gagal membuat direktori: %w", err)
+	data, err := io.ReadAll(src)
+	if err != nil {
+		return "", fmt.Errorf("gagal membaca file: %w", err)
 	}
 
 	sanitized := unsafeCharsRe.ReplaceAllString(filepath.Base(file.Filename), "_")
-	filename := strconv.FormatInt(time.Now().UnixNano(), 10) + "-" + sanitized
-	destPath := filepath.Join(dir, filename)
-
-	dst, err := os.Create(destPath)
-	if err != nil {
-		return "", fmt.Errorf("gagal membuat file: %w", err)
-	}
-
-	if _, err := io.Copy(dst, src); err != nil {
-		_ = dst.Close()
-		_ = os.Remove(destPath)
+	key := path.Join("profiles", userID, strconv.FormatInt(time.Now().UnixNano(), 10)+"-"+sanitized)
+	if err := store.Put(ctx, key, data, file.Header.Get("Content-Type")); err != nil {
 		return "", fmt.Errorf("gagal menyimpan file: %w", err)
 	}
-	_ = dst.Close()
-
-	return filepath.ToSlash(filepath.Join("profiles", userID, filename)), nil
+	return key, nil
 }

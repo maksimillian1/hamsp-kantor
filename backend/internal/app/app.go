@@ -28,6 +28,7 @@ import (
 	backendauth "github.com/kana-consultant/kantor/backend/internal/auth"
 	"github.com/kana-consultant/kantor/backend/internal/config"
 	"github.com/kana-consultant/kantor/backend/internal/docgen"
+	"github.com/kana-consultant/kantor/backend/internal/filestore"
 	adminhandler "github.com/kana-consultant/kantor/backend/internal/handler/admin"
 	authhandler "github.com/kana-consultant/kantor/backend/internal/handler/auth"
 	fileshandler "github.com/kana-consultant/kantor/backend/internal/handler/files"
@@ -81,6 +82,7 @@ type App struct {
 	auditRepository *auditrepo.Repository
 	// legalHandler serves /operational/legal-documents and legal-parties.
 	legalHandler *legalhandler.Handler
+	fileStore    *filestore.Tenant
 }
 
 func New(ctx context.Context, cfg config.Config) (*App, error) {
@@ -227,7 +229,13 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	subscriptionsService := hrisservice.NewSubscriptionsService(subscriptionsRepository, employeesRepository, encrypter, financeService)
 	hrisOverviewService := hrisservice.NewOverviewService(hrisOverviewRepository, employeesRepository, encrypter, payrollCache)
 	hrProfilesService := hrisservice.NewHRProfilesService(hrProfilesRepository, employeesRepository, encrypter)
+	fileStore, err := newFileStore(ctx, cfg)
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
 	companyProfileService := authservice.NewCompanyProfileService(authRepository, cfg.UploadsDir)
+	companyProfileService.SetFileStore(fileStore)
 
 	// Document engine: DOCX render + LibreOffice PDF, rendered in the
 	// background by the document worker. Document kinds (payslips,
@@ -242,7 +250,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	adsMetricsService := marketingservice.NewAdsMetricsService(adsMetricsRepository)
 	leadsService := marketingservice.NewLeadsService(leadsRepository, authRepository, notificationsService)
 	marketingOverviewService := marketingservice.NewOverviewService(marketingOverviewRepository)
-	filesService := filesservice.New(cfg.UploadsDir, reimbursementsRepository, campaignsRepository, employeesRepository)
+	filesService := filesservice.New(cfg.UploadsDir, fileStore, reimbursementsRepository, campaignsRepository, employeesRepository)
 
 	// WhatsApp Broadcast (per-tenant: client loaded from DB config on demand)
 	waRepository := warepo.New(pool)
@@ -313,6 +321,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		accessTokenBlacklist: accessTokenBlacklist,
 		auditRepository:      auditRepository,
 		legalHandler:         legalhandler.NewHandler(legalService),
+		fileStore:            fileStore,
 	}
 	router, err := application.buildRouter(
 		auditService,
@@ -418,6 +427,7 @@ func (a *App) buildRouter(
 ) (http.Handler, error) {
 	router := chi.NewRouter()
 	authHandler := authhandler.New(authService, a.cfg)
+	authHandler.SetFileStore(a.fileStore)
 	authHandler.SetDocumentMailService(documentMailService)
 	authHandler.SetCompanyProfileService(companyProfileService)
 	patHandler := authhandler.NewPATHandler(patService)
@@ -1129,4 +1139,27 @@ func seedTenants(ctx context.Context, pool *pgxpool.Pool, tenants []config.Tenan
 		slog.InfoContext(ctx, "tenant seeded", "name", tc.Name, "slug", tc.Slug, "domains", tc.Domains)
 	}
 	return nil
+}
+
+// newFileStore keys objects by tenant whenever tenants share one store: always
+// in S3, and on local disk in platform mode, where tenant IDs come from outside.
+func newFileStore(ctx context.Context, cfg config.Config) (*filestore.Tenant, error) {
+	if cfg.FileStorage.Backend != "s3" {
+		return filestore.NewTenant(filestore.NewLocal(cfg.UploadsDir), cfg.PlatformMode), nil
+	}
+	s3, err := filestore.NewS3(filestore.S3Config{
+		Endpoint:        cfg.FileStorage.S3Endpoint,
+		Bucket:          cfg.FileStorage.S3Bucket,
+		AccessKeyID:     cfg.FileStorage.S3AccessKeyID,
+		SecretAccessKey: cfg.FileStorage.S3SecretKey,
+		UseSSL:          cfg.FileStorage.S3UseSSL,
+		Region:          cfg.FileStorage.S3Region,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := s3.Check(ctx); err != nil {
+		return nil, err
+	}
+	return filestore.NewTenant(s3, true), nil
 }

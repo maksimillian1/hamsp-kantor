@@ -1,11 +1,13 @@
 package files
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -61,7 +63,21 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf("%s; filename=%q", disposition, filepath.Base(filename)))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")
-	http.ServeFile(w, r, file.Path)
+	if file.Key == "" {
+		http.ServeFile(w, r, file.Path)
+		return
+	}
+	data, err := h.service.Read(r.Context(), file.Key)
+	if err != nil {
+		w.Header().Del("Content-Disposition")
+		if errors.Is(err, filesservice.ErrFileNotFound) {
+			response.WriteError(w, http.StatusNotFound, "FILE_NOT_FOUND", "Requested file was not found", nil)
+			return
+		}
+		response.WriteInternalError(r.Context(), w, err, "An unexpected error occurred")
+		return
+	}
+	http.ServeContent(w, r, filename, time.Time{}, bytes.NewReader(data))
 }
 
 // shouldForceDownload returns true for filenames whose extension is not a
