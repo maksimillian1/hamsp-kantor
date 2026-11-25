@@ -2,12 +2,14 @@ package middleware
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	backendauth "github.com/kana-consultant/kantor/backend/internal/auth"
 	"github.com/kana-consultant/kantor/backend/internal/rbac"
 	"github.com/kana-consultant/kantor/backend/internal/response"
+	"github.com/kana-consultant/kantor/backend/internal/tenant"
 )
 
 type Principal struct {
@@ -96,49 +98,96 @@ func AuthMiddleware(
 				userID, tenantID = claims.Subject, claims.TenantID
 			}
 
-			cachedPermissions, err := WithScopedTenantConn(r.Context(), func(ctx context.Context) (*rbac.CachedPermissions, error) {
-				return loadPermissions(ctx, userID)
-			})
-			if err != nil {
-				response.WriteError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Failed to resolve user permissions", nil)
-				return
-			}
-			if !cachedPermissions.IsActive {
-				response.WriteError(w, http.StatusForbidden, "INACTIVE_USER", "akun pengguna sedang tidak aktif", nil)
-				return
-			}
-
-			if patScope != nil {
-				def, ok := patScopeDefs[*patScope]
-				if !ok {
-					response.WriteError(w, http.StatusForbidden, "FORBIDDEN", "token scope is not permitted", nil)
-					return
-				}
-				cachedPermissions = restrictCachedPermissions(cachedPermissions, def)
-			}
-
-			roles := make([]string, 0, len(cachedPermissions.ModuleRoles)+1)
-			if cachedPermissions.IsSuperAdmin {
-				roles = append(roles, "super_admin")
-			}
-			for moduleID, role := range cachedPermissions.ModuleRoles {
-				roles = append(roles, role.RoleSlug+":"+moduleID)
-			}
-
-			principal := Principal{
-				UserID:       userID,
-				TenantID:     tenantID,
-				IsSuperAdmin: cachedPermissions.IsSuperAdmin,
-				Roles:        roles,
-				Permissions:  cachedPermissions.PermissionList(),
-				ModuleRoles:  cachedPermissions.ModuleRoles,
-				Cached:       cachedPermissions,
-			}
-
-			ctx := context.WithValue(r.Context(), principalContextKey, principal)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			servePrincipal(w, r, next, userID, tenantID, patScope, loadPermissions)
 		})
 	}
+}
+
+// UserHeader carries the platform's user ID, set only by the HAMSP API
+// Gateway after it has validated the user's token.
+const UserHeader = "X-User-Id"
+
+// PlatformAuthMiddleware is AuthMiddleware for platform mode: the user comes
+// from UserHeader and is found or created by ensureUser; KANTOR's own tokens
+// are not accepted.
+func PlatformAuthMiddleware(
+	ensureUser func(context.Context, string) (string, error),
+	loadPermissions func(context.Context, string) (*rbac.CachedPermissions, error),
+) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			values := r.Header.Values(UserHeader)
+			if len(values) != 1 || !tenant.ExternalIDPattern.MatchString(values[0]) {
+				response.WriteError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Missing or invalid user", nil)
+				return
+			}
+			info, ok := tenant.FromContext(r.Context())
+			if !ok {
+				response.WriteError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Missing tenant", nil)
+				return
+			}
+			userID, err := WithScopedTenantConn(r.Context(), func(ctx context.Context) (string, error) {
+				return ensureUser(ctx, values[0])
+			})
+			if err != nil {
+				slog.ErrorContext(r.Context(), "resolve platform user", "error", err)
+				response.WriteError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Failed to resolve user", nil)
+				return
+			}
+			servePrincipal(w, r, next, userID, info.ID, nil, loadPermissions)
+		})
+	}
+}
+
+func servePrincipal(
+	w http.ResponseWriter,
+	r *http.Request,
+	next http.Handler,
+	userID, tenantID string,
+	patScope *string,
+	loadPermissions func(context.Context, string) (*rbac.CachedPermissions, error),
+) {
+	cachedPermissions, err := WithScopedTenantConn(r.Context(), func(ctx context.Context) (*rbac.CachedPermissions, error) {
+		return loadPermissions(ctx, userID)
+	})
+	if err != nil {
+		response.WriteError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Failed to resolve user permissions", nil)
+		return
+	}
+	if !cachedPermissions.IsActive {
+		response.WriteError(w, http.StatusForbidden, "INACTIVE_USER", "akun pengguna sedang tidak aktif", nil)
+		return
+	}
+
+	if patScope != nil {
+		def, ok := patScopeDefs[*patScope]
+		if !ok {
+			response.WriteError(w, http.StatusForbidden, "FORBIDDEN", "token scope is not permitted", nil)
+			return
+		}
+		cachedPermissions = restrictCachedPermissions(cachedPermissions, def)
+	}
+
+	roles := make([]string, 0, len(cachedPermissions.ModuleRoles)+1)
+	if cachedPermissions.IsSuperAdmin {
+		roles = append(roles, "super_admin")
+	}
+	for moduleID, role := range cachedPermissions.ModuleRoles {
+		roles = append(roles, role.RoleSlug+":"+moduleID)
+	}
+
+	principal := Principal{
+		UserID:       userID,
+		TenantID:     tenantID,
+		IsSuperAdmin: cachedPermissions.IsSuperAdmin,
+		Roles:        roles,
+		Permissions:  cachedPermissions.PermissionList(),
+		ModuleRoles:  cachedPermissions.ModuleRoles,
+		Cached:       cachedPermissions,
+	}
+
+	ctx := context.WithValue(r.Context(), principalContextKey, principal)
+	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
 func PrincipalFromContext(ctx context.Context) (Principal, bool) {
