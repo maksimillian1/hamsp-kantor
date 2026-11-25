@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -149,11 +150,38 @@ func ReleaseTenantConn(conn *pgxpool.Conn) {
 // dedicated connection from the pool, and configures RLS by setting the
 // app.current_tenant GUC and (when superuser) downgrading to kantor_app.
 func TenantMiddleware(pool *pgxpool.Pool, resolver *tenant.Resolver) func(http.Handler) http.Handler {
+	return tenantMiddleware(pool, func(r *http.Request) (tenant.Info, bool) {
+		info, err := resolver.Resolve(r.Context(), r.Host)
+		return info, err == nil
+	}, http.StatusBadRequest, "UNKNOWN_TENANT", "Could not resolve tenant for this domain")
+}
+
+// TenantHeader carries the platform's tenant ID, set only by the HAMSP API
+// Gateway after it has validated the user's token.
+const TenantHeader = "X-Tenant-Id"
+
+// PlatformTenantMiddleware is TenantMiddleware for platform mode: the tenant
+// comes only from TenantHeader; the Host header is ignored.
+func PlatformTenantMiddleware(pool *pgxpool.Pool, resolver *tenant.ExternalResolver) func(http.Handler) http.Handler {
+	return tenantMiddleware(pool, func(r *http.Request) (tenant.Info, bool) {
+		values := r.Header.Values(TenantHeader)
+		if len(values) != 1 {
+			return tenant.Info{}, false
+		}
+		info, err := resolver.Resolve(r.Context(), values[0])
+		if err != nil && !errors.Is(err, tenant.ErrInvalidExternalID) {
+			slog.ErrorContext(r.Context(), "resolve platform tenant", "error", err)
+		}
+		return info, err == nil
+	}, http.StatusUnauthorized, "UNKNOWN_TENANT", "Missing or unknown tenant")
+}
+
+func tenantMiddleware(pool *pgxpool.Pool, resolve func(*http.Request) (tenant.Info, bool), failStatus int, failCode, failMessage string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			info, err := resolver.Resolve(r.Context(), r.Host)
-			if err != nil {
-				response.WriteError(w, http.StatusBadRequest, "UNKNOWN_TENANT", "Could not resolve tenant for this domain", nil)
+			info, ok := resolve(r)
+			if !ok {
+				response.WriteError(w, failStatus, failCode, failMessage, nil)
 				return
 			}
 
@@ -213,28 +241,29 @@ func ForEachTenant(ctx context.Context, pool *pgxpool.Pool, fn func(ctx context.
 	}
 
 	for _, t := range tenants {
-		conn, err := pool.Acquire(ctx)
-		if err != nil {
+		if err := RunForTenant(ctx, pool, t, fn); err != nil {
 			return err
-		}
-
-		if err := setupTenantConn(ctx, conn, t.ID); err != nil {
-			conn.Release()
-			return err
-		}
-
-		tenantCtx := tenant.WithInfo(ctx, t)
-		tenantCtx = repository.WithConn(tenantCtx, conn)
-
-		fnErr := fn(tenantCtx, t)
-
-		_, _ = conn.Exec(context.Background(), "RESET ALL")
-		conn.Release()
-
-		if fnErr != nil {
-			return fnErr
 		}
 	}
 
 	return nil
+}
+
+// RunForTenant runs fn on a connection scoped to tenant t.
+func RunForTenant(ctx context.Context, pool *pgxpool.Pool, t tenant.Info, fn func(ctx context.Context, t tenant.Info) error) error {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	if err := setupTenantConn(ctx, conn, t.ID); err != nil {
+		conn.Release()
+		return err
+	}
+	defer func() {
+		_, _ = conn.Exec(context.Background(), "RESET ALL")
+		conn.Release()
+	}()
+
+	tenantCtx := tenant.WithInfo(ctx, t)
+	return fn(repository.WithConn(tenantCtx, conn), t)
 }

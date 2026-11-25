@@ -71,6 +71,7 @@ type App struct {
 	backgroundCancel     context.CancelFunc
 	permissionCache      *rbac.PermissionCache
 	tenantResolver       *tenant.Resolver
+	externalResolver     *tenant.ExternalResolver
 	metrics              *metrics.Registry
 	accessTokenBlacklist *backendauth.AccessTokenBlacklist
 	// auditRepository backs the opt-in audit_logs redaction scrub of
@@ -131,6 +132,10 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	}
 
 	tenantResolver := tenant.NewResolver(pool)
+	defaultsSeeder := newTenantDefaultsSeeder(pool)
+	externalResolver := tenant.NewExternalResolver(pool, func(ctx context.Context, t tenant.Info) error {
+		return platformmiddleware.RunForTenant(ctx, pool, t, defaultsSeeder.seed)
+	})
 
 	// Seed all tenants from env (TENANTS=name|slug|domains;...).
 	// Runs as superuser — no RLS needed for global tables.
@@ -141,7 +146,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 
 	// Seed RBAC defaults, finance categories, WA templates and the campaign
 	// stage columns per tenant (tenant_defaults.go).
-	if err := platformmiddleware.ForEachTenant(ctx, pool, newTenantDefaultsSeeder(pool).seed); err != nil {
+	if err := platformmiddleware.ForEachTenant(ctx, pool, defaultsSeeder.seed); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("seed per-tenant defaults: %w", err)
 	}
@@ -300,6 +305,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		db:                   pool,
 		permissionCache:      permissionCache,
 		tenantResolver:       tenantResolver,
+		externalResolver:     externalResolver,
 		metrics:              metrics.NewRegistry(),
 		accessTokenBlacklist: accessTokenBlacklist,
 		auditRepository:      auditRepository,
@@ -466,7 +472,11 @@ func (a *App) buildRouter(
 
 	// All API routes require tenant resolution from the Host header.
 	router.Group(func(tenanted chi.Router) {
-		tenanted.Use(platformmiddleware.TenantMiddleware(a.db, a.tenantResolver))
+		if a.cfg.PlatformMode {
+			tenanted.Use(platformmiddleware.PlatformTenantMiddleware(a.db, a.externalResolver))
+		} else {
+			tenanted.Use(platformmiddleware.TenantMiddleware(a.db, a.tenantResolver))
+		}
 
 		if !a.cfg.PlatformMode {
 			// OAuth 2.1 authorization server for MCP remote connectors (public).
