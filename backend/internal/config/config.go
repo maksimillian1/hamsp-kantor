@@ -42,6 +42,9 @@ type Config struct {
 	// DataMaintenance holds the opt-in, irreversible clean-ups of existing
 	// rows. Both are off unless explicitly enabled.
 	DataMaintenance DataMaintenanceConfig
+	// PlatformMode (PLATFORM_MODE) runs KANTOR behind the HAMSP platform,
+	// which owns sign-in; KANTOR's own auth, OAuth, MCP and the extension are off.
+	PlatformMode bool
 }
 
 // DataMaintenanceConfig switches on clean-ups that rewrite existing rows and
@@ -147,6 +150,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	dataMaintenance := loadDataMaintenanceConfig()
+	platformMode, err := parseBool("PLATFORM_MODE", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		AppEnv:                    appEnv,
@@ -170,6 +177,7 @@ func Load() (Config, error) {
 		DocumentMailDevSMTPAddr: strings.TrimSpace(os.Getenv("DOCUMENT_MAIL_DEV_SMTP_ADDR")),
 		Documents:               documents,
 		DataMaintenance:         dataMaintenance,
+		PlatformMode:            platformMode,
 	}
 
 	if cfg.DatabaseURL == "" {

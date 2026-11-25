@@ -468,21 +468,25 @@ func (a *App) buildRouter(
 	router.Group(func(tenanted chi.Router) {
 		tenanted.Use(platformmiddleware.TenantMiddleware(a.db, a.tenantResolver))
 
-		// OAuth 2.1 authorization server for MCP remote connectors (public).
-		tenanted.Get("/.well-known/oauth-authorization-server", oauthHandler.AuthorizationServerMetadata)
-		tenanted.Get("/.well-known/oauth-protected-resource", oauthHandler.ProtectedResourceMetadata)
-		tenanted.With(platformmiddleware.NewIPRateLimit(10, time.Minute,
-			"RATE_LIMITED", "Too many client registration attempts. Try again later.",
-		)).Post("/oauth/register", oauthHandler.Register)
-		tenanted.With(platformmiddleware.NewIPRateLimit(20, time.Minute,
-			"RATE_LIMITED", "Too many authorization requests. Try again later.",
-		)).Get("/oauth/authorize", oauthHandler.Authorize)
-		tenanted.With(platformmiddleware.NewIPRateLimit(20, time.Minute,
-			"RATE_LIMITED", "Too many token requests. Try again later.",
-		)).Post("/oauth/token", oauthHandler.Token)
+		if !a.cfg.PlatformMode {
+			// OAuth 2.1 authorization server for MCP remote connectors (public).
+			tenanted.Get("/.well-known/oauth-authorization-server", oauthHandler.AuthorizationServerMetadata)
+			tenanted.Get("/.well-known/oauth-protected-resource", oauthHandler.ProtectedResourceMetadata)
+			tenanted.With(platformmiddleware.NewIPRateLimit(10, time.Minute,
+				"RATE_LIMITED", "Too many client registration attempts. Try again later.",
+			)).Post("/oauth/register", oauthHandler.Register)
+			tenanted.With(platformmiddleware.NewIPRateLimit(20, time.Minute,
+				"RATE_LIMITED", "Too many authorization requests. Try again later.",
+			)).Get("/oauth/authorize", oauthHandler.Authorize)
+			tenanted.With(platformmiddleware.NewIPRateLimit(20, time.Minute,
+				"RATE_LIMITED", "Too many token requests. Try again later.",
+			)).Post("/oauth/token", oauthHandler.Token)
+		}
 
 		tenanted.Route("/api/v1", func(r chi.Router) {
-			r.Route("/auth", authHandler.RegisterRoutes)
+			if !a.cfg.PlatformMode {
+				r.Route("/auth", authHandler.RegisterRoutes)
+			}
 			r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 				response.WriteJSON(w, http.StatusOK, map[string]string{
 					"status": "ok",
@@ -502,11 +506,13 @@ func (a *App) buildRouter(
 				protected.Put("/auth/client-context", authHandler.UpdateClientContext)
 				protected.Get("/auth/profile", authHandler.GetProfile)
 				protected.Put("/auth/profile", authHandler.UpdateProfile)
-				protected.Put("/auth/profile/email", authHandler.ChangeEmail)
 				protected.Post("/auth/profile/avatar", authHandler.UploadProfileAvatar)
-				protected.Post("/auth/change-password", authHandler.ChangePassword)
-				protected.Route("/auth/pat", patHandler.RegisterRoutes)
-				protected.Post("/oauth/grant", oauthHandler.Grant)
+				if !a.cfg.PlatformMode {
+					protected.Put("/auth/profile/email", authHandler.ChangeEmail)
+					protected.Post("/auth/change-password", authHandler.ChangePassword)
+					protected.Route("/auth/pat", patHandler.RegisterRoutes)
+					protected.Post("/oauth/grant", oauthHandler.Grant)
+				}
 				protected.Get("/files/{type}/{id}/{filename}", filesHandler.Serve)
 				protected.With(platformmiddleware.RequireAnyPermission(
 					"admin:roles:view",
@@ -575,6 +581,9 @@ func (a *App) buildRouter(
 					module.With(projectsHandler.RequireProjectAccess).Route("/projects/{projectID}/columns", kanbanHandler.RegisterColumnRoutes)
 					module.With(projectsHandler.RequireProjectAccess).Route("/projects/{projectID}/tasks", kanbanHandler.RegisterTaskRoutes)
 					module.With(platformmiddleware.RequirePermission("operational:task:view")).Get("/tasks/mine", kanbanHandler.ListMyTasks)
+					if a.cfg.PlatformMode {
+						return
+					}
 					module.Route("/vps", vpsHandler.RegisterRoutes)
 					module.Route("/domains", domainHandler.RegisterRoutes)
 					if a.legalHandler != nil {
@@ -582,6 +591,10 @@ func (a *App) buildRouter(
 						module.Route("/legal-parties", a.legalHandler.RegisterPartyRoutes)
 					}
 				})
+
+				if a.cfg.PlatformMode {
+					return
+				}
 
 				protected.Route("/discord-reminder", func(r chi.Router) {
 					r.Use(platformmiddleware.RequireModuleAccess(rbac.ModuleOperational))
@@ -634,6 +647,10 @@ func (a *App) buildRouter(
 		})
 	})
 
+	if a.cfg.PlatformMode {
+		return router, nil
+	}
+
 	// MCP endpoint. Tools are derived from the live route table (minus superadmin
 	// + public routes) and dispatched in-process, so they re-enter the tenant +
 	// auth + RBAC chain with the caller's personal access token.
@@ -663,12 +680,18 @@ func (a *App) startBackgroundJobs(authService *authservice.Service, subscription
 	a.permissionCache.StartSweeper(ctx, 5*time.Minute)
 
 	runPerTenant := func(name string, fn func(ctx context.Context, t tenant.Info) error) {
+		if a.cfg.PlatformMode && !platformModeJobs[name] {
+			return
+		}
 		if err := platformmiddleware.ForEachTenant(ctx, a.db, fn); err != nil {
 			slog.ErrorContext(ctx, "per-tenant background job failed", "job", name, "error", err)
 		}
 	}
 
 	runBackground := func(name string, fn func()) {
+		if a.cfg.PlatformMode && !platformModeJobs[name] {
+			return
+		}
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -963,6 +986,14 @@ func ensureRuntimeDirectories(cfg config.Config) error {
 const defaultTenantID = "00000000-0000-0000-0000-000000000001"
 
 const mcpServerVersion = "0.1.0"
+
+// platformModeJobs are the background jobs that still run in platform mode;
+// the others belong to modules that are off or to auth the platform replaces.
+var platformModeJobs = map[string]bool{
+	"audit_redaction_scrub": true,
+	"background_scheduler":  true,
+	"email_scheduler":       true,
+}
 
 // seedTenants ensures every tenant defined in the TENANTS env var exists in the
 // database with the correct name, slug, domains, and a WA config row.
