@@ -1,4 +1,5 @@
-import { authPostJSON, getJSON, postJSON } from "@/lib/api-client";
+import { authPostJSON, getJSON, postJSON, refreshPlatformSession } from "@/lib/api-client";
+import { isPlatformMode, platformLogout } from "@/lib/platform";
 import { useAuthStore } from "@/stores/auth-store";
 import type { AuthPayload, AuthSession } from "@/types/auth";
 
@@ -53,7 +54,10 @@ export function register(payload: RegisterRequest) {
   return postJSON<AuthPayload, RegisterRequest>("/auth/register", payload);
 }
 
-export function refresh() {
+export function refresh(): Promise<AuthPayload> {
+  if (isPlatformMode()) {
+    return refreshPlatformSession();
+  }
   return postJSON<AuthPayload, Record<string, never>>("/auth/refresh", {});
 }
 
@@ -117,6 +121,12 @@ export async function refreshSession() {
 
 export async function logout() {
   const store = useAuthStore.getState();
+
+  if (isPlatformMode()) {
+    store.clearSession();
+    await platformLogout();
+    return;
+  }
 
   try {
     const accessToken = store.session?.tokens.access_token;

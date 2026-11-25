@@ -23,6 +23,7 @@ import { useSidebarStore } from "@/stores/sidebar-store";
 import { toast } from "@/stores/toast-store";
 import { useThemeStore } from "@/stores/theme-store";
 import type { NotificationItem } from "@/types/notification";
+import { isPathAvailable } from "@/lib/platform";
 
 function readBrowserNotificationPermission(): NotificationPermission {
   if (typeof window === "undefined" || !("Notification" in window)) {
@@ -74,9 +75,11 @@ export function Topbar() {
     },
   });
 
+  const whatsAppAvailable = isPathAvailable("/operational/wa-broadcast");
   const phoneQuery = useQuery({
     queryKey: waKeys.phone(),
     queryFn: getUserPhone,
+    enabled: whatsAppAvailable,
   });
 
   const phoneUpdateMutation = useMutation({
@@ -505,6 +508,7 @@ export function Topbar() {
                   </div>
                 ) : null}
               </div>
+              {whatsAppAvailable && (
               <div className="border-b border-border px-4 py-3">
                 <div className="flex items-center gap-2 text-xs text-text-secondary mb-2">
                   <Phone className="h-3.5 w-3.5" />
@@ -548,6 +552,7 @@ export function Topbar() {
                   </button>
                 )}
               </div>
+              )}
               <div className="border-b border-border p-2">
                 <Link
                   to="/profile"

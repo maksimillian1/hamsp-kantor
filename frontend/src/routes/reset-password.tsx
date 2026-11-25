@@ -1,8 +1,10 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
+import { Link, createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
+
+import { isPlatformMode } from "@/lib/platform";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -29,6 +31,11 @@ type ResetPasswordFormValues = z.infer<typeof resetPasswordSchema>;
 
 export const Route = createFileRoute("/reset-password")({
   validateSearch: searchSchema,
+  beforeLoad: () => {
+    if (isPlatformMode()) {
+      throw redirect({ to: "/login", search: { redirect: undefined } });
+    }
+  },
   component: ResetPasswordPage,
 });
 

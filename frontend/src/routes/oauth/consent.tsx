@@ -2,6 +2,8 @@ import { useMutation } from "@tanstack/react-query";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { ShieldCheck } from "lucide-react";
 
+import { isPlatformMode } from "@/lib/platform";
+
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ensureAuthenticated } from "@/services/auth";
@@ -27,6 +29,9 @@ export const Route = createFileRoute("/oauth/consent")({
     scope: String(search.scope ?? ""),
   }),
   beforeLoad: async () => {
+    if (isPlatformMode()) {
+      throw redirect({ to: "/login", search: { redirect: undefined } });
+    }
     const session = await ensureAuthenticated();
     if (!session) {
       throw redirect({

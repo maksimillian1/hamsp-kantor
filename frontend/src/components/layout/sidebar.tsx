@@ -30,6 +30,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { useRBAC } from "@/hooks/use-rbac";
 import { permissions } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
+import { isPathAvailable } from "@/lib/platform";
 
 interface NavItem {
   to: string;
@@ -206,6 +207,7 @@ export function Sidebar({ collapsed = false, mobile = false, onNavigate, onToggl
       ...section,
       items: section.items.filter(
         (item) =>
+          isPathAvailable(item.to) &&
           hasPermission(item.permission) &&
           (item.requires ?? []).every((permission) => hasPermission(permission)),
       ),
@@ -240,7 +242,7 @@ export function Sidebar({ collapsed = false, mobile = false, onNavigate, onToggl
       },
     ].filter((item) => hasPermission(item.permission));
 
-    if (isSuperAdmin) {
+    if (isSuperAdmin && isPathAvailable("/admin/registration")) {
       adminItems.push({
         to: "/admin/registration",
         label: "Registrasi",
