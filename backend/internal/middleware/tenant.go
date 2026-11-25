@@ -3,12 +3,10 @@ package middleware
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kana-consultant/kantor/backend/internal/repository"
@@ -19,40 +17,6 @@ import (
 const notificationsStreamPath = "/api/v1/notifications/stream"
 
 type tenantPoolCtxKey struct{}
-
-// setupTenantConn configures a pooled connection for RLS.
-// It sets the app.current_tenant GUC using a parameterized query (guaranteed
-// clean pgx protocol) and, when running as superuser (Docker dev), also sets
-// the session role to kantor_app so that RLS policies are enforced.
-func setupTenantConn(ctx context.Context, conn *pgxpool.Conn, tenantID string) error {
-	if _, err := uuid.Parse(tenantID); err != nil {
-		return fmt.Errorf("invalid tenant id: %w", err)
-	}
-
-	// set_config via parameterized QueryRow — fully consumes the response.
-	var ignored string
-	if err := conn.QueryRow(ctx,
-		"SELECT set_config('app.current_tenant', $1, false)", tenantID,
-	).Scan(&ignored); err != nil {
-		return fmt.Errorf("set tenant guc: %w", err)
-	}
-
-	// In Docker dev the DB user is superuser; SET ROLE so RLS applies.
-	// In production (NixOS) the user is already non-superuser, so this is a no-op.
-	var isSuperuser bool
-	if err := conn.QueryRow(ctx,
-		"SELECT current_setting('is_superuser') = 'on'",
-	).Scan(&isSuperuser); err != nil {
-		return fmt.Errorf("check superuser: %w", err)
-	}
-	if isSuperuser {
-		if _, err := conn.Exec(ctx, "SET ROLE kantor_app"); err != nil {
-			return fmt.Errorf("set role: %w", err)
-		}
-	}
-
-	return nil
-}
 
 func withTenantPool(ctx context.Context, pool *pgxpool.Pool) context.Context {
 	return context.WithValue(ctx, tenantPoolCtxKey{}, pool)
@@ -103,47 +67,37 @@ func WithScopedTenantConn[T any](ctx context.Context, fn func(context.Context) (
 	if err != nil {
 		return zero, err
 	}
+	defer conn.Release()
 
-	if err := setupTenantConn(ctx, conn, info.ID); err != nil {
-		conn.Release()
+	db, err := newTenantConn(ctx, conn, info.ID)
+	if err != nil {
 		return zero, err
 	}
 
-	defer func() {
-		_, _ = conn.Exec(context.Background(), "RESET ALL")
-		conn.Release()
-	}()
-
-	return fn(repository.WithConn(ctx, conn))
+	return fn(repository.WithConn(ctx, db))
 }
 
-// AcquireTenantConn acquires a fresh tenant-scoped connection from the pool
-// with `app.current_tenant` set + role downgraded (if needed). Caller MUST
-// release via ReleaseTenantConn when done.
-//
-// Use this when you need a private conn for a unit of work that runs in
-// parallel with other workers (e.g. monitor probe workers) — sharing a
-// single pgxpool.Conn across goroutines is not safe.
-func AcquireTenantConn(ctx context.Context, pool *pgxpool.Pool, tenantID string) (*pgxpool.Conn, error) {
+// AcquireTenantConn acquires a private tenant-scoped connection for a unit of
+// work that runs in parallel with other workers (sharing one pgxpool.Conn
+// across goroutines is not safe). Release it with ReleaseTenantConn.
+func AcquireTenantConn(ctx context.Context, pool *pgxpool.Pool, tenantID string) (*TenantConn, error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := setupTenantConn(ctx, conn, tenantID); err != nil {
+	db, err := newTenantConn(ctx, conn, tenantID)
+	if err != nil {
 		conn.Release()
 		return nil, err
 	}
-	return conn, nil
+	return db, nil
 }
 
-// ReleaseTenantConn resets session state and returns the conn to the pool.
-// Always pair with AcquireTenantConn via defer.
-func ReleaseTenantConn(conn *pgxpool.Conn) {
+func ReleaseTenantConn(conn *TenantConn) {
 	if conn == nil {
 		return
 	}
-	_, _ = conn.Exec(context.Background(), "RESET ALL")
-	conn.Release()
+	conn.conn.Release()
 }
 
 // TenantMiddleware resolves the tenant from the Host header, acquires a
@@ -198,21 +152,14 @@ func tenantMiddleware(pool *pgxpool.Pool, resolve func(*http.Request) (tenant.In
 				response.WriteError(w, http.StatusServiceUnavailable, "DB_UNAVAILABLE", "Could not acquire database connection", nil)
 				return
 			}
+			defer conn.Release()
 
-			if err := setupTenantConn(r.Context(), conn, info.ID); err != nil {
-				conn.Release()
+			db, err := newTenantConn(r.Context(), conn, info.ID)
+			if err != nil {
 				response.WriteError(w, http.StatusInternalServerError, "TENANT_SETUP_FAILED", "Failed to configure tenant context", nil)
 				return
 			}
-
-			// Store tenant info and the scoped connection in context.
-			ctx = repository.WithConn(ctx, conn)
-
-			// Ensure we clean up the connection regardless of outcome.
-			defer func() {
-				_, _ = conn.Exec(context.Background(), "RESET ALL")
-				conn.Release()
-			}()
+			ctx = repository.WithConn(ctx, db)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -255,15 +202,11 @@ func RunForTenant(ctx context.Context, pool *pgxpool.Pool, t tenant.Info, fn fun
 	if err != nil {
 		return err
 	}
-	if err := setupTenantConn(ctx, conn, t.ID); err != nil {
-		conn.Release()
+	defer conn.Release()
+
+	db, err := newTenantConn(ctx, conn, t.ID)
+	if err != nil {
 		return err
 	}
-	defer func() {
-		_, _ = conn.Exec(context.Background(), "RESET ALL")
-		conn.Release()
-	}()
-
-	tenantCtx := tenant.WithInfo(ctx, t)
-	return fn(repository.WithConn(tenantCtx, conn), t)
+	return fn(repository.WithConn(tenant.WithInfo(ctx, t), db), t)
 }
